@@ -14,9 +14,7 @@ phases:
 
   pre_build:
     commands:
-      # Authenticate to ECR Private (for pushing app image)
       - aws ecr get-login-password --region $AWS_REGION | docker login --username AWS --password-stdin $AWS_ACCOUNT_ID.dkr.ecr.$AWS_REGION.amazonaws.com
-      # Authenticate to ECR Public (for pulling node:20-alpine base image, avoids Docker Hub rate limits)
       - aws ecr-public get-login-password --region us-east-1 | docker login --username AWS --password-stdin public.ecr.aws
       - COMMIT_HASH=$(echo $CODEBUILD_RESOLVED_SOURCE_VERSION | cut -c 1-7)
       - IMAGE_TAG=${COMMIT_HASH:=latest}
@@ -36,6 +34,8 @@ phases:
       - docker push $REPO_URI:latest
       - echo Updating kubeconfig...
       - aws eks update-kubeconfig --region $AWS_REGION --name $EKS_CLUSTER_NAME
+      - echo Creating namespace if it does not exist...
+      - kubectl create namespace demo --dry-run=client -o yaml | kubectl apply -f -
       - echo Deploying to EKS...
       - sed -i "s|IMAGE_PLACEHOLDER|$REPO_URI:$IMAGE_TAG|g" k8s/deployment.yaml
       - kubectl apply -f k8s/
