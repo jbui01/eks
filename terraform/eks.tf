@@ -3,7 +3,7 @@ module "eks" {
   version = "~> 20.0"
 
   cluster_name    = var.eks_cluster_name
-  cluster_version = "1.29"
+  cluster_version = "1.32"
 
   vpc_id     = module.vpc.vpc_id
   subnet_ids = module.vpc.private_subnets
@@ -13,10 +13,16 @@ module "eks" {
 
   eks_managed_node_groups = {
     default = {
-      instance_types = ["t3.micro"]
+      instance_types = ["t3.medium"]
       min_size       = 1
       max_size       = 3
       desired_size   = 2
+
+      iam_role_additional_policies = {
+        AmazonEKSWorkerNodePolicy         = "arn:aws:iam::aws:policy/AmazonEKSWorkerNodePolicy"
+        AmazonEKS_CNI_Policy              = "arn:aws:iam::aws:policy/AmazonEKS_CNI_Policy"
+        AmazonEC2ContainerRegistryReadOnly = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
+     }
     }
   }
 
@@ -28,11 +34,20 @@ module "eks" {
         admin = {
           policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
           access_scope = { type = "cluster" }
+    jim = {
+      principal_arn = "arn:aws:iam::406159385314:user/jim"
+      policy_associations = {
+        admin = {
+          policy_arn   = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy"
+          access_scope = { type = "cluster" }
+        }
         }
       }
     }
   }
 }
+}
+
 
 module "vpc" {
   source  = "terraform-aws-modules/vpc/aws"
@@ -52,4 +67,5 @@ module "vpc" {
   # Tags required by EKS for subnet auto-discovery
   public_subnet_tags  = { "kubernetes.io/role/elb" = 1 }
   private_subnet_tags = { "kubernetes.io/role/internal-elb" = 1 }
+}
 }
