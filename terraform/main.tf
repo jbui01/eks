@@ -12,10 +12,6 @@ variable "aws_region"       { default = "us-east-1" }
 variable "github_owner"     { description = "GitHub username/org" }
 variable "github_repo"      { description = "GitHub repo name" }
 variable "github_branch"    { default = "main" }
-variable "github_oauth_token" {
-  description = "GitHub personal access token (store in SSM or env)"
-  sensitive   = true
-}
 variable "eks_cluster_name" { default = "demo-cluster" }
 
 data "aws_caller_identity" "current" {}
@@ -26,20 +22,70 @@ locals {
   region     = data.aws_region.current.name
 }
 
-# ── ECR Repository ──────────────────────────────────────────────────────────
+# ── CodeStar Connection (GitHub v2) ──────────────────────────────────────────
+# Terraform creates this in PENDING state. After `terraform apply` you MUST
+# open the AWS Console → CodePipeline → Settings → Connections and click
+# "Update pending connection" to complete the OAuth handshake with GitHub.
+# The pipeline will not run until the connection status is "Available".
+resource "aws_codestarconnections_connection" "github" {
+  name          = "eks-demo-github"
+  provider_type = "GitHub"
+}
+
+# ── CodePipeline IAM Role ─────────────────────────────────────────────────────
+# The pipeline role needs codestar-connections:UseConnection so it can
+# pull source code through the CodeStar connection at runtime.
+resource "aws_iam_role" "codepipeline" {
+  name = "eks-demo-pipeline-role"
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [{
+      Action    = "sts:AssumeRole"
+      Effect    = "Allow"
+      Principal = { Service = "codepipeline.amazonaws.com" }
+    }]
+  })
+}
+
+resource "aws_iam_role_policy" "codepipeline_policy" {
+  role = aws_iam_role.codepipeline.id
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect   = "Allow"
+        Action   = ["s3:*"]
+        Resource = [aws_s3_bucket.pipeline_artifacts.arn, "${aws_s3_bucket.pipeline_artifacts.arn}/*"]
+      },
+      {
+        Effect   = "Allow"
+        Action   = ["codebuild:BatchGetBuilds", "codebuild:StartBuild"]
+        Resource = aws_codebuild_project.app.arn
+      },
+      # Required for the GitHub v2 source action
+      {
+        Effect   = "Allow"
+        Action   = ["codestar-connections:UseConnection"]
+        Resource = aws_codestarconnections_connection.github.arn
+      }
+    ]
+  })
+}
+
+# ── ECR Repository ────────────────────────────────────────────────────────────
 resource "aws_ecr_repository" "app" {
   name                 = "eks-demo-app"
   image_tag_mutability = "MUTABLE"
   image_scanning_configuration { scan_on_push = true }
 }
 
-# ── S3 bucket for pipeline artifacts ────────────────────────────────────────
+# ── S3 bucket for pipeline artifacts ─────────────────────────────────────────
 resource "aws_s3_bucket" "pipeline_artifacts" {
   bucket        = "eks-demo-pipeline-artifacts-${local.account_id}"
   force_destroy = true
 }
 
-# ── CodeBuild IAM Role ───────────────────────────────────────────────────────
+# ── CodeBuild IAM Role ────────────────────────────────────────────────────────
 resource "aws_iam_role" "codebuild" {
   name = "eks-demo-codebuild-role"
   assume_role_policy = jsonencode({
@@ -89,7 +135,7 @@ resource "aws_iam_role_policy" "codebuild_policy" {
   })
 }
 
-# ── CodeBuild Project ────────────────────────────────────────────────────────
+# ── CodeBuild Project ─────────────────────────────────────────────────────────
 resource "aws_codebuild_project" "app" {
   name          = "eks-demo-build"
   service_role  = aws_iam_role.codebuild.arn
@@ -127,39 +173,7 @@ resource "aws_codebuild_project" "app" {
   }
 }
 
-# ── CodePipeline IAM Role ────────────────────────────────────────────────────
-resource "aws_iam_role" "codepipeline" {
-  name = "eks-demo-pipeline-role"
-  assume_role_policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [{
-      Action    = "sts:AssumeRole"
-      Effect    = "Allow"
-      Principal = { Service = "codepipeline.amazonaws.com" }
-    }]
-  })
-}
-
-resource "aws_iam_role_policy" "codepipeline_policy" {
-  role = aws_iam_role.codepipeline.id
-  policy = jsonencode({
-    Version = "2012-10-17"
-    Statement = [
-      {
-        Effect   = "Allow"
-        Action   = ["s3:*"]
-        Resource = [aws_s3_bucket.pipeline_artifacts.arn, "${aws_s3_bucket.pipeline_artifacts.arn}/*"]
-      },
-      {
-        Effect   = "Allow"
-        Action   = ["codebuild:BatchGetBuilds", "codebuild:StartBuild"]
-        Resource = aws_codebuild_project.app.arn
-      }
-    ]
-  })
-}
-
-# ── CodePipeline ─────────────────────────────────────────────────────────────
+# ── CodePipeline ──────────────────────────────────────────────────────────────
 resource "aws_codepipeline" "app" {
   name     = "eks-demo-pipeline"
   role_arn = aws_iam_role.codepipeline.arn
@@ -174,16 +188,16 @@ resource "aws_codepipeline" "app" {
     action {
       name             = "GitHub_Source"
       category         = "Source"
-      owner            = "ThirdParty"
-      provider         = "GitHub"
+      owner            = "AWS"        # v2 actions are owned by AWS, not ThirdParty
+      provider         = "CodeStarSourceConnection"
       version          = "1"
       output_artifacts = ["source_output"]
       configuration = {
-        Owner                = var.github_owner
-        Repo                 = var.github_repo
-        Branch               = var.github_branch
-        OAuthToken           = var.github_oauth_token
-        PollForSourceChanges = "false"   # use webhook instead
+        ConnectionArn        = aws_codestarconnections_connection.github.arn
+        FullRepositoryId     = "${var.github_owner}/${var.github_repo}"
+        BranchName           = var.github_branch
+        OutputArtifactFormat = "CODE_ZIP"
+        DetectChanges        = "true"   # replaces the old webhook; no separate resource needed
       }
     }
   }
@@ -205,29 +219,10 @@ resource "aws_codepipeline" "app" {
   }
 }
 
-# ── GitHub Webhook (push → pipeline trigger) ─────────────────────────────────
-resource "aws_codepipeline_webhook" "github" {
-  name            = "eks-demo-webhook"
-  target_action   = "GitHub_Source"
-  target_pipeline = aws_codepipeline.app.name
-  authentication  = "GITHUB_HMAC"
-
-  authentication_configuration {
-    secret_token = random_password.webhook_secret.result
-  }
-
-  filter {
-    json_path    = "$.ref"
-    match_equals = "refs/heads/${var.github_branch}"
-  }
+# ── Outputs ───────────────────────────────────────────────────────────────────
+output "ecr_repository_url"        { value = aws_ecr_repository.app.repository_url }
+output "pipeline_name"             { value = aws_codepipeline.app.name }
+output "codestar_connection_arn"   { value = aws_codestarconnections_connection.github.arn }
+output "codestar_connection_status" {
+  value = aws_codestarconnections_connection.github.connection_status
 }
-
-resource "random_password" "webhook_secret" {
-  length  = 32
-  special = false
-}
-
-# ── Outputs ──────────────────────────────────────────────────────────────────
-output "ecr_repository_url" { value = aws_ecr_repository.app.repository_url }
-output "pipeline_name"       { value = aws_codepipeline.app.name }
-output "webhook_url"         { value = aws_codepipeline_webhook.github.url }

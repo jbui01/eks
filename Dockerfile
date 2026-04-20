@@ -12,6 +12,8 @@ RUN addgroup -S appgroup && adduser -S appuser -G appgroup
 COPY --from=builder /app/node_modules ./node_modules
 COPY src/ ./src/
 COPY package.json ./
+# Give the non-root user ownership of all app files
+RUN chown -R appuser:appgroup /app
 USER appuser
 EXPOSE 3000
 CMD ["node", "src/index.js"]
